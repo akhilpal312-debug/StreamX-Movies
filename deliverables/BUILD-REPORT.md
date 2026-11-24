@@ -23,10 +23,10 @@ package.
 | ESLint (changed areas) | **Passed** (0 errors, 1 pre-existing warning) |
 | Unit tests | **Passed** — 4/4 bulk installer tests, 8/8 existing pure-logic tests |
 | Production JS bundle | **Passed** — `expo export --platform android`: 2,613 modules, Hermes bytecode 8.6 MB |
-| Debug APK | **Not produced in this workspace** — see build attempts below |
-| Release APK | **Not produced in this workspace** — see build attempts below |
-| AAB | **Not produced in this workspace** — see build attempts below |
-| CI workflow for debug APK + release AAB | Added: `.github/workflows/streamx-android-build.yml` |
+| Debug APK | **Built by CI** — GitHub artifact `streamx-debug-apk`, 144,294,940 bytes, workflow run 45408534706 (success) |
+| Release AAB | **Built by CI** — GitHub artifact `streamx-release-aab`, 139,932,919 bytes, same run |
+| Debug APK / AAB in this workspace | **Not produced here** — the workspace cannot finish the native build; see below |
+| CI workflow for debug APK + release AAB | `.github/workflows/streamx-android-build.yml` (committed on `main`) |
 
 ## Native build attempts in this workspace (honest limitation)
 A portable toolchain was installed into `/tmp` (Temurin JDK 17.0.21.1, cmdline-tools `11076708`,
@@ -59,11 +59,41 @@ libtorrent — it cannot finish there. No APK/AAB is claimed from this workspace
 
 ## CI workflow that builds both artifacts
 `.github/workflows/streamx-android-build.yml` runs on `workflow_dispatch` and on `v*` tags on
-`ubuntu-latest` (180-minute timeout): JDK 17 (Temurin), Node 22, `android-actions/setup-android`,
-sdkmanager (`platform-tools`, `platforms;android-36`, `build-tools;36.0.0`,
-`ndk;27.1.12297006`, `cmake;3.22.1`), Gradle cache, `npm ci`, `expo prebuild`, then
-`assembleDebug` and `bundleRelease` with `-PreactNativeArchitectures=arm64-v8a,armeabi-v7a`.
-Artifacts: `streamx-0.1-debug.apk` and `streamx-0.1-release.aab`.
+`ubuntu-latest` (180-minute timeout): JDK 17 (Temurin), Node 22, the runner image's own Android SDK,
+`npm ci`, the cached ARMv7 FFmpegKit build, `expo prebuild`, then `assembleDebug` and
+`bundleRelease` with `-PreactNativeArchitectures=arm64-v8a,armeabi-v7a`. Artifacts:
+`streamx-0.1-debug.apk` and `streamx-0.1-release.aab`.
+
+### CI result (run 45408534706, commit `c61c06b`, 37m 46s, success)
+| Step | Result |
+|---|---|
+| ARMv7 FFmpegKit (source build, cache miss) | 10m 42s |
+| Debug APK (`assembleDebug`, arm64-v8a + armeabi-v7a) | 12m 47s |
+| Release AAB (`bundleRelease`, R8 + resource shrinking) | 11m 54s |
+| `streamx-debug-apk` artifact | 144,294,940 bytes |
+| `streamx-release-aab` artifact | 139,932,919 bytes |
+
+Both artifacts are zipped by GitHub on upload and each contains a single file that is already a zip
+container, so the archive sizes above are effectively the APK and AAB sizes. Download them from the
+run page: Actions → “StreamX Android build” → run 45408534706 → Artifacts.
+
+### Errors that had to be fixed before artifacts appeared
+1. `android-actions/setup-android@v3` failed 11 s into the first run: on the `ubuntu-26.04` runner
+image it treats the preinstalled `cmdline-tools 20.0` as the “wrong version”, downloads
+`cmdline-tools 16.0`, then dies in the license step. The workflow now uses the image's own SDK
+(`ANDROID_HOME`, `cmdline-tools/latest/bin`).
+2. `bundleRelease` failed at `:app:verifyFfmpegArmv7`:
+```
+> Task :app:verifyFfmpegArmv7 FAILED
+* What went wrong:
+Execution failed for task ':app:verifyFfmpegArmv7'.
+> Missing ARMv7 FFmpegKit: .../android/app/src/main/jniLibs/armeabi-v7a/libffmpegkit.so.
+  Run bash scripts/build-ffmpeg-armv7.sh before Expo prebuild.
+```
+That guard runs only when release native libraries are merged, which is why the debug APK built on
+the first attempt while the AAB could not. The workflow now calls the repository's cached
+`.github/actions/ffmpeg-armv7` composite action before `expo prebuild`; the FFmpeg ARMv7 libraries
+are also why the debug APK grew from 133,938,071 to 144,294,940 bytes between runs.
 
 Signing: if the repository secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
 `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` are set, the AAB is signed with that keystore;
