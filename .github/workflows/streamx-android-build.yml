@@ -83,6 +83,13 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      # Release builds fail in :app:verifyFfmpegArmv7 without the 32-bit
+      # FFmpegKit libraries, which have to exist in .native/ before prebuild
+      # copies them into android/app/src/main/jniLibs. The composite action
+      # caches the result, so only the first run pays for the source build.
+      - name: Build ARMv7 FFmpegKit
+        uses: ./.github/actions/ffmpeg-armv7
+
       - name: Generate native project
         run: npx expo prebuild --platform android --no-install
         env:
