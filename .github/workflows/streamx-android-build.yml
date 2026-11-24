@@ -36,17 +36,39 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # The runner image ships a full SDK (and ANDROID_HOME). android-actions/
+      # setup-android@v3 rejects the image's cmdline-tools as "wrong version" on
+      # ubuntu-26.04, so use the image's own tools instead of re-downloading them.
+      - name: Configure Android SDK
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::No sdkmanager at $SDKMANAGER"
+            ls "$SDK_ROOT/cmdline-tools" || true
+            exit 1
+          fi
+          {
+            echo "ANDROID_HOME=$SDK_ROOT"
+            echo "ANDROID_SDK_ROOT=$SDK_ROOT"
+          } >> "$GITHUB_ENV"
+          {
+            echo "$SDK_ROOT/cmdline-tools/latest/bin"
+            echo "$SDK_ROOT/platform-tools"
+          } >> "$GITHUB_PATH"
+          "$SDKMANAGER" --version
 
       - name: Install Android SDK packages
+        # No `pipefail` here: `yes` is expected to die of SIGPIPE once sdkmanager
+        # stops reading.
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager \
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0" \
-            "ndk;27.1.12297006" \
             "cmake;3.22.1"
 
       - name: Cache Gradle
