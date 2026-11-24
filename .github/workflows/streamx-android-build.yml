@@ -1,0 +1,140 @@
+name: StreamX Android build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+env:
+  # Native modules (WebRTC, FFmpeg, libtorrent, New Architecture) are expensive to
+  # compile; the two ARM ABIs cover every current phone without quadrupling build time.
+  REACT_NATIVE_ARCHITECTURES: arm64-v8a,armeabi-v7a
+
+jobs:
+  build:
+    name: Debug APK + Release AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('package-lock.json', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate native project
+        run: npx expo prebuild --platform android --no-install
+        env:
+          CI: '1'
+
+      - name: Prepare release signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE="$RUNNER_TEMP/streamx-release.keystore"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+            STORE_PASSWORD="$KEYSTORE_PASSWORD"
+            ALIAS="$KEY_ALIAS"
+            KEYPASS="$KEY_PASSWORD"
+            echo "Release signing: using the keystore from the ANDROID_KEYSTORE_BASE64 secret."
+          else
+            keytool -genkeypair -v -storetype PKCS12 -keystore "$KEYSTORE" \
+              -alias streamx-ci -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass ci-temporary -keypass ci-temporary \
+              -dname "CN=StreamX CI, OU=CI, O=StreamX, L=Unknown, ST=Unknown, C=US"
+            STORE_PASSWORD="ci-temporary"
+            ALIAS="streamx-ci"
+            KEYPASS="ci-temporary"
+            echo "::warning::No release keystore secret configured - the AAB is signed with a temporary CI key and is NOT Play Store ready."
+          fi
+          {
+            echo "MYAPP_UPLOAD_STORE_FILE=$KEYSTORE"
+            echo "MYAPP_UPLOAD_STORE_PASSWORD=$STORE_PASSWORD"
+            echo "MYAPP_UPLOAD_KEY_ALIAS=$ALIAS"
+            echo "MYAPP_UPLOAD_KEY_PASSWORD=$KEYPASS"
+          } >> "$GITHUB_ENV"
+
+      - name: Build debug APK
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            -PreactNativeArchitectures="$REACT_NATIVE_ARCHITECTURES"
+
+      # Collected and uploaded before the AAB build so a later failure still
+      # leaves the APK downloadable from the run.
+      - name: Collect debug APK
+        run: |
+          mkdir -p artifacts
+          find android/app/build/outputs/apk/debug -name '*.apk' -exec cp {} artifacts/streamx-0.1-debug.apk \;
+          ls -lh artifacts
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamx-debug-apk
+          path: artifacts/streamx-0.1-debug.apk
+          if-no-files-found: error
+
+      - name: Build release AAB
+        run: |
+          cd android
+          ./gradlew bundleRelease --no-daemon --stacktrace \
+            -PreactNativeArchitectures="$REACT_NATIVE_ARCHITECTURES"
+
+      - name: Collect release AAB
+        run: |
+          mkdir -p artifacts
+          find android/app/build/outputs/bundle/release -name '*.aab' -exec cp {} artifacts/streamx-0.1-release.aab \;
+          ls -lh artifacts
+
+      - name: Upload release AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamx-release-aab
+          path: artifacts/streamx-0.1-release.aab
+          if-no-files-found: error
