@@ -1,8 +1,7 @@
 name: StreamX AAB diagnose
 
-# Temporary diagnostic workflow: reruns only bundleRelease with Gradle output
-# redirected to a file, then prints the tail on failure so the error is visible
-# at the end of a short job log.
+# Temporary diagnostic workflow: reruns only bundleRelease through a script so
+# the job log stays short and the Gradle failure block is visible at its end.
 
 on:
   workflow_dispatch:
@@ -11,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  REACT_NATIVE_ARCHITECTURES: arm64-v8a,armeabi-v7a
+  REACT_NATIVE_ARCHITECTURES: arm64-v8a
 
 jobs:
   build:
@@ -35,72 +34,14 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - name: Configure Android SDK
-        run: |
-          set -euo pipefail
-          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          {
-            echo "ANDROID_HOME=$SDK_ROOT"
-            echo "ANDROID_SDK_ROOT=$SDK_ROOT"
-          } >> "$GITHUB_ENV"
-          {
-            echo "$SDK_ROOT/cmdline-tools/latest/bin"
-            echo "$SDK_ROOT/platform-tools"
-          } >> "$GITHUB_PATH"
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-diagnose-${{ runner.os }}
+          restore-keys: gradle-${{ runner.os }}-
 
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
-
-      - name: Generate native project
-        run: npx expo prebuild --platform android --no-install
-        env:
-          CI: '1'
-
-      - name: Prepare release signing
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KEYSTORE="$RUNNER_TEMP/streamx-release.keystore"
-          if [ -n "${KEYSTORE_B64:-}" ]; then
-            printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
-            STORE_PASSWORD="$KEYSTORE_PASSWORD"
-            ALIAS="$KEY_ALIAS"
-            KEYPASS="$KEY_PASSWORD"
-          else
-            keytool -genkeypair -v -storetype PKCS12 -keystore "$KEYSTORE" \
-              -alias streamx-ci -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass ci-temporary -keypass ci-temporary \
-              -dname "CN=StreamX CI, OU=CI, O=StreamX, L=Unknown, ST=Unknown, C=US"
-            STORE_PASSWORD="ci-temporary"
-            ALIAS="streamx-ci"
-            KEYPASS="ci-temporary"
-          fi
-          {
-            echo "MYAPP_UPLOAD_STORE_FILE=$KEYSTORE"
-            echo "MYAPP_UPLOAD_STORE_PASSWORD=$STORE_PASSWORD"
-            echo "MYAPP_UPLOAD_KEY_ALIAS=$ALIAS"
-            echo "MYAPP_UPLOAD_KEY_PASSWORD=$KEYPASS"
-          } >> "$GITHUB_ENV"
-
-      - name: Build release AAB (tail printed on failure)
-        run: |
-          chmod +x android/gradlew
-          cd android
-          set +e
-          ./gradlew bundleRelease --no-daemon \
-            -PreactNativeArchitectures="$REACT_NATIVE_ARCHITECTURES" \
-            > "$RUNNER_TEMP/aab.log" 2>&1
-          STATUS=$?
-          echo "gradle exit status: $STATUS"
-          if [ "$STATUS" -ne 0 ]; then
-            echo "===== last 500 lines of the release build ====="
-            tail -n 500 "$RUNNER_TEMP/aab.log"
-            echo "===== end of release build log ====="
-          else
-            tail -n 40 "$RUNNER_TEMP/aab.log"
-          fi
-          exit "$STATUS"
+      - name: Diagnose release bundle
+        run: bash scripts/ci-diagnose-aab.sh
